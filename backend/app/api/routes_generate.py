@@ -20,6 +20,7 @@ def _state_from_request(request: GenerateRequest) -> GraphState:
         user_prompt=request.prompt,
         canvas=CanvasSpec(width=request.width, height=request.height),
         max_iterations=request.max_iterations,
+        min_iterations=request.min_iterations,
         target_score=request.target_score,
     )
 

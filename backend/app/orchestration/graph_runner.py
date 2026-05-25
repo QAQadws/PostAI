@@ -1,3 +1,10 @@
+"""Graph runner — Phase 2 (HTML/CSS pipeline).
+
+Orchestrates the multi-agent poster-generation pipeline.
+The layout planner now produces an HTML document; the renderer is an
+``HTMLPainter`` that captures it via headless Chromium.
+"""
+
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
@@ -16,6 +23,12 @@ from app.schemas.state import GraphStage, GraphState
 
 
 class GraphRunner:
+    """Top-level orchestrator that wires agents together.
+
+    Default dependencies are created for tests / quick start; in production
+    you can inject pre-configured agent instances.
+    """
+
     def __init__(
         self,
         content_extractor: ContentExtractor | None = None,
@@ -25,25 +38,29 @@ class GraphRunner:
         asset_store: AssetStore | None = None,
         critic: HeuristicVLMCritic | None = None,
     ) -> None:
-        from app.render.pillow_renderer import PillowPosterRenderer
+        from app.render.html_painter import HTMLPainter
 
         settings = get_settings()
         self.content_extractor = content_extractor or ContentExtractor()
         self.style_director = style_director or StyleDirector()
         self.layout_planner = layout_planner or SpatialLayoutPlanner()
-        self.renderer = renderer or PillowPosterRenderer()
+        self.renderer = renderer or HTMLPainter()
         self.asset_store = asset_store or AssetStore(settings.asset_dir, settings.asset_url_path)
         self.critic = critic or HeuristicVLMCritic()
+
+    # ── streaming (SSE) ──
 
     async def run_events(self, state: GraphState) -> AsyncIterator[SSEEvent]:
         try:
             yield event("job_started", {"job_id": state.job_id})
 
+            # ── Content ──
             state.stage = GraphStage.content
             yield event("agent_start", {"job_id": state.job_id, "agent": "ContentExtractor", "message": "Parsing poster content"})
             state.content_plan = await retry_async(lambda: self.content_extractor.run(state), attempts=3)
             yield event("agent_complete", {"job_id": state.job_id, "agent": "ContentExtractor", "result": state.content_plan.model_dump(mode="json")})
 
+            # ── Style ──
             state.stage = GraphStage.style
             yield event("agent_start", {"job_id": state.job_id, "agent": "StyleDirector", "message": "Planning visual style"})
             state.style = await retry_async(lambda: self.style_director.run(state), attempts=3)
@@ -53,14 +70,24 @@ class GraphRunner:
             best_score = -1
 
             while state.iteration_count < state.max_iterations:
+                # ── Layout (HTML) ──
                 state.stage = GraphStage.layout
-                yield event("agent_start", {"job_id": state.job_id, "agent": "SpatialLayoutPlanner", "message": "Planning layout tree"})
-                state.layout_tree = await retry_async(lambda: self.layout_planner.run(state), attempts=3)
-                yield event("agent_complete", {"job_id": state.job_id, "agent": "SpatialLayoutPlanner", "result": state.layout_tree.model_dump(mode="json")})
+                yield event("agent_start", {"job_id": state.job_id, "agent": "SpatialLayoutPlanner", "message": "Designing poster HTML/CSS"})
+                state.layout_html = await retry_async(lambda: self.layout_planner.run(state), attempts=3)
+                # Persist the HTML source alongside the rendered PNG.
+                state.html_url = await self.asset_store.save_html(
+                    state.layout_html, job_id=state.job_id, iteration=state.iteration_count
+                )
+                preview = state.layout_html[:200] + "..." if len(state.layout_html) > 200 else state.layout_html
+                yield event("agent_complete", {"job_id": state.job_id, "agent": "SpatialLayoutPlanner", "result": {"html_preview": preview, "html_url": state.html_url}})
 
+                # ── Render (Playwright) ──
                 state.stage = GraphStage.render
-                yield event("agent_start", {"job_id": state.job_id, "agent": "RenderInterface", "message": "Rendering poster preview"})
-                state.render_result = await retry_async(lambda: self.renderer.render(state), attempts=2)
+                yield event("agent_start", {"job_id": state.job_id, "agent": "HTMLPainter", "message": "Rendering poster via headless browser"})
+                state.render_result = await retry_async(
+                    lambda: self.renderer.render(state.layout_html, width=state.canvas.width, height=state.canvas.height),
+                    attempts=2,
+                )
                 state.render_result = await self.asset_store.save_render(
                     state.render_result,
                     job_id=state.job_id,
@@ -68,16 +95,22 @@ class GraphRunner:
                 )
                 yield event("render_preview", {"job_id": state.job_id, "iteration": state.iteration_count, **state.render_result.model_dump(mode="json")})
 
+                # ── Critique (VLM) ──
                 state.stage = GraphStage.critique
                 yield event("agent_start", {"job_id": state.job_id, "agent": "VLMCritic", "message": "Reviewing visual result"})
                 critique = await retry_async(lambda: self.critic.run(state), attempts=2)
                 state.feedback_history.append(critique)
-                yield event("critique", {"job_id": state.job_id, **critique.model_dump(mode="json")})
+                yield event("critique", {
+                    "job_id": state.job_id,
+                    **critique.model_dump(mode="json"),
+                    "vision_reasoning": state.vision_reasoning,
+                })
 
                 if critique.score > best_score:
                     best_score = critique.score
                     best_response = self.build_response(state)
 
+                # ── Decision ──
                 decision = route_after_critique(state)
                 if decision.action == RouteAction.final:
                     if critique.score < state.target_score and not critique.passed:
@@ -92,23 +125,24 @@ class GraphRunner:
                     state.style = await retry_async(lambda: self.style_director.run(state), attempts=3)
                     yield event("agent_complete", {"job_id": state.job_id, "agent": "StyleDirector", "result": state.style.model_dump(mode="json")})
 
+            # ── Finalise ──
             state.stage = GraphStage.final
             response = self._finalize_response(best_response, state)
             yield event("final_output", response.model_dump(mode="json"))
             yield event("job_finished", {"job_id": state.job_id, "stage": state.stage.value})
+
         except Exception as exc:
             failed_stage = state.stage.value
             state.stage = GraphStage.error
             state.error = str(exc)
-            yield event(
-                "error",
-                {
-                    "job_id": state.job_id,
-                    "stage": failed_stage,
-                    "message": str(exc),
-                    "recoverable": False,
-                },
-            )
+            yield event("error", {
+                "job_id": state.job_id,
+                "stage": failed_stage,
+                "message": str(exc),
+                "recoverable": False,
+            })
+
+    # ── synchronous convenience ──
 
     async def run(self, state: GraphState) -> GenerateResponse:
         final: GenerateResponse | None = None
@@ -132,6 +166,8 @@ class GraphRunner:
             content_plan=state.content_plan,
             style=state.style,
             layout_tree=state.layout_tree,
+            layout_html=state.layout_html,
+            html_url=state.html_url,
             render_result=state.render_result,
             critiques=state.feedback_history,
         )
@@ -139,10 +175,8 @@ class GraphRunner:
     def _finalize_response(self, best_response: GenerateResponse | None, state: GraphState) -> GenerateResponse:
         response = best_response or self.build_response(state)
         latest = state.feedback_history[-1] if state.feedback_history else None
-        return response.model_copy(
-            update={
-                "warnings": list(state.warnings),
-                "critiques": list(state.feedback_history),
-                "score": response.score if response.score is not None else (latest.score if latest else None),
-            }
-        )
+        return response.model_copy(update={
+            "warnings": list(state.warnings),
+            "critiques": list(state.feedback_history),
+            "score": response.score if response.score is not None else (latest.score if latest else None),
+        })

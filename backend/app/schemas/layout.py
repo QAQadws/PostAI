@@ -40,7 +40,7 @@ class LayoutStyle(BaseModel):
     color: str | None = None
     background_color: str | None = None
     opacity: float = Field(default=1.0, ge=0, le=1)
-    font_size: float | None = Field(default=None, gt=0)
+    font_size: float | None = Field(default=None, gt=0, le=0.15)
     font_weight: Literal["regular", "medium", "bold", "black"] | None = None
     align: Literal["left", "center", "right"] | None = None
     radius: float | None = Field(default=None, ge=0, le=1)

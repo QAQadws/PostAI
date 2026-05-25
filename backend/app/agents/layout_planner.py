@@ -1,16 +1,35 @@
+"""Spatial layout planner — Phase 2 (HTML/CSS output).
+
+Produces a complete, self-contained HTML document that the ``HTMLPainter``
+renders via headless Chromium.  No more custom schema — the LLM writes
+HTML+CSS directly, which it understands natively.
+
+Every iteration calls the LLM with full context (VLM feedback from the
+previous round) so the design improves incrementally.
+"""
+
 from __future__ import annotations
 
-from copy import deepcopy
+import re
 
 from app.core.config import get_settings
 from app.core.errors import LLMCallError, SchemaParseError
 from app.core.llm_client import StructuredLLMClient
-from app.schemas.agents import AdjustmentAction, AdjustmentVector
-from app.schemas.layout import Box, FlexSpec, LayoutNode, LayoutStyle, LayoutTree
+from app.render.html_painter import _build_fallback_html
 from app.schemas.state import GraphState
 
 
 class SpatialLayoutPlanner:
+    """Plan the visual layout of a poster as a self-contained HTML document.
+
+    On every call to ``run()`` the planner asks the text LLM to produce a
+    complete HTML page.  VLM feedback from a previous iteration is included
+    in the prompt so the LLM knows what to improve.
+
+    Falls back to a simple template-built HTML document when the LLM is
+    unavailable.
+    """
+
     def __init__(self, llm_client: StructuredLLMClient | None = None) -> None:
         settings = get_settings()
         self.allow_model_fallback = settings.allow_model_fallback
@@ -21,13 +40,13 @@ class SpatialLayoutPlanner:
             response_format=settings.llm_response_format,
         )
 
-    async def run(self, state: GraphState) -> LayoutTree:
-        if state.layout_tree and state.feedback_history:
-            tree = deepcopy(state.layout_tree)
-            for adjustment in state.feedback_history[-1].adjustments:
-                self._apply_adjustment(tree.root, adjustment)
-            return tree
+    # ── public API ──
 
+    async def run(self, state: GraphState) -> str:
+        """Return a complete HTML document for the poster.
+
+        Always calls the LLM so it can react to the latest VLM feedback.
+        """
         try:
             return await self._run_llm(state)
         except (LLMCallError, SchemaParseError) as exc:
@@ -35,162 +54,168 @@ class SpatialLayoutPlanner:
                 raise
             if self._configured_for_llm():
                 state.warnings.append(f"SpatialLayoutPlanner LLM fallback: {exc}")
-            return self._initial_layout(state)
+            return self._run_fallback(state)
 
-    async def _run_llm(self, state: GraphState) -> LayoutTree:
+    # ── LLM path ──
+
+    async def _run_llm(self, state: GraphState) -> str:
         if state.content_plan is None or state.style is None:
             raise ValueError("content_plan and style are required before layout planning")
+        if not self._configured_for_llm():
+            raise LLMCallError("LLM provider is not configured")
 
-        messages = [
-            {
-                "role": "system",
-                "content": (
-                    "You are a spatial layout planner for poster design. Return only JSON matching LayoutTree. "
-                    "Use relative coordinates from 0 to 1. The root must be a container covering the full canvas. "
-                    "Each content element should appear as an element node. Keep all boxes inside canvas, avoid overlap, "
-                    "and set font_size, color, and align for text elements."
-                ),
-            },
-            {
-                "role": "user",
-                "content": (
-                    f"Canvas: {state.canvas.model_dump(mode='json')}\n"
-                    f"Content plan: {state.content_plan.model_dump(mode='json')}\n"
-                    f"Style guide: {state.style.model_dump(mode='json')}\n"
-                    f"Feedback history: {[item.model_dump(mode='json') for item in state.feedback_history[-2:]]}"
-                ),
-            },
+        messages = self._build_messages(state)
+        # Use _chat_completion directly so we get the raw text output (not
+        # parsed through a JSON schema).  The LLM returns a full HTML doc.
+        # force_raw=True is critical — the LLM must output free-form HTML
+        # text, not a JSON object.  Without it the client sends
+        # response_format=json_object and the API returns 400.
+        content = await self.llm_client._chat_completion(
+            messages=messages,
+            response_model=type("_Dummy", (), {}),  # unused by _chat_completion for extraction
+            force_raw=True,
+        )
+        html = self._extract_html(content)
+        self._validate_html(html)
+        return html
+
+    def _build_messages(self, state: GraphState) -> list[dict]:
+        """Build the LLM prompt asking for a complete HTML poster."""
+        w = state.canvas.width
+        h = state.canvas.height
+        style = state.style
+
+        system = (
+            "You are a poster designer.  Output a COMPLETE, self-contained "
+            "HTML document for a poster.  Use inline CSS or a <style> block. "
+            "Do NOT use JavaScript.\n\n"
+            "Requirements:\n"
+            f"- The <body> IS the poster canvas: exactly {w}x{h}px.  Set "
+            "body {{ width:{w}px; height:{h}px; overflow:hidden; }} in CSS.\n"
+            "- Use CSS gradients, shadows (box-shadow, text-shadow), "
+            "border-radius, and opacity for modern visual effects.\n"
+            "- Load fonts via @import from Google Fonts CDN, e.g. "
+            "@import url('https://fonts.googleapis.com/css2?family=...').\n"
+            "- For images, use inline SVG or placeholder images "
+            "(e.g. https://placehold.co/600x400/EEE/31343C).\n"
+            "- Every element from the ContentPlan MUST appear in the poster.\n"
+            f"- Use these colours from the StyleGuide: primary={style.primary_color}, "
+            f"secondary={style.secondary_color}, accent={style.accent_color}, "
+            f"text={style.text_color}, mood={style.mood}.\n"
+            "- The design must be visually impressive — a real, polished poster, "
+            "not a wireframe or documentation example.\n\n"
+            "IMPORTANT: Return ONLY the HTML source, starting with <!DOCTYPE html>. "
+            "Do NOT wrap it in markdown code fences."
+        )
+
+        # Build feedback context from previous VLM critique.
+        feedback_text = ""
+        if state.feedback_history:
+            latest_fb = state.feedback_history[-1]
+            parts = []
+            # Include browser console errors so the LLM can fix broken CSS / fonts.
+            if state.render_result and state.render_result.console_errors:
+                import json
+                parts.append(
+                    "Browser console errors from your previous HTML: "
+                    + json.dumps(state.render_result.console_errors, ensure_ascii=False)
+                )
+            if state.vision_reasoning:
+                parts.append(f"Vision model reasoning: {state.vision_reasoning[:2000]}")
+            if latest_fb.vision_description:
+                parts.append(f"What the vision model saw: {latest_fb.vision_description}")
+            if latest_fb.issues:
+                import json
+                parts.append(f"Issues found: {json.dumps(latest_fb.issues, ensure_ascii=False)}")
+            if latest_fb.suggestions:
+                import json
+                parts.append(
+                    f"Suggested improvements: {json.dumps(latest_fb.suggestions, ensure_ascii=False)}"
+                )
+            if parts:
+                parts.insert(0, "=== Feedback from VLM review of the PREVIOUS version ===")
+                parts.append(
+                    "Rewrite the HTML to address these specific issues. "
+                    "Keep the overall structure and content, but fix the problems "
+                    "described above. Output the complete revised HTML document."
+                )
+                feedback_text = "\n".join(parts)
+
+        user_parts = [
+            f"User prompt: {state.user_prompt}",
+            f"Canvas: {w}x{h}px",
+            f"Content plan: {state.content_plan.model_dump(mode='json')}",
+            f"Style guide: {style.model_dump(mode='json')}",
         ]
-        tree = await self.llm_client.parse(messages=messages, response_model=LayoutTree)
-        self._validate_layout_elements(tree, {element.id for element in state.content_plan.elements})
-        return tree
+        if feedback_text:
+            user_parts.append(feedback_text)
+        user_parts.append("Output the complete HTML document now.")
+
+        return [
+            {"role": "system", "content": system},
+            {"role": "user", "content": "\n\n".join(user_parts)},
+        ]
+
+    def _extract_html(self, content: str) -> str:
+        """Strip markdown code fences if the LLM wraps the HTML."""
+        html = content.strip()
+        # Remove leading ```html fence
+        html = re.sub(r"^```html?\s*\n?", "", html, flags=re.IGNORECASE)
+        # Remove trailing ``` fence
+        html = re.sub(r"\n?```\s*$", "", html)
+        html = html.strip()
+        if not html:
+            raise SchemaParseError("LLM returned empty HTML after stripping fences")
+        return html
+
+    def _validate_html(self, html: str) -> None:
+        """Guard against obviously broken HTML before handing it to the Painter.
+
+        The Painter (Playwright) can render almost anything, but we catch
+        the most common LLM mistakes early so they trigger a retry instead of
+        producing a blank screenshot.
+        """
+        lower = html.lower()
+        if "<body" not in lower and "<html" not in lower:
+            raise SchemaParseError("HTML output must contain a <body> or <html> tag")
+        if len(html) < 50:
+            raise SchemaParseError("HTML output is too short to be a valid poster document")
+
+    # ── fallback ──
+
+    def _run_fallback(self, state: GraphState) -> str:
+        """Template-built poster when the LLM is not available."""
+        style = state.style
+        elements = state.content_plan.elements if state.content_plan else []
+
+        title = "Poster"
+        subtitle = ""
+        cta = "Learn More"
+        for el in elements:
+            if el.id == "title":
+                title = el.content
+            elif el.id == "subtitle":
+                subtitle = el.content
+            elif el.id == "cta":
+                cta = el.content
+
+        return _build_fallback_html(
+            width=state.canvas.width,
+            height=state.canvas.height,
+            primary=style.primary_color if style else "#1a1a2e",
+            secondary=style.secondary_color if style else "#16213e",
+            accent=style.accent_color if style else "#00d4ff",
+            text_color=style.text_color if style else "#ffffff",
+            title=title,
+            subtitle=subtitle or " ",
+            cta=cta,
+        )
+
+    # ── helpers ──
 
     def _configured_for_llm(self) -> bool:
-        return bool(self.llm_client.api_key and self.llm_client.base_url and not self.llm_client.model.startswith("mock-"))
-
-    def _validate_layout_elements(self, tree: LayoutTree, element_ids: set[str]) -> None:
-        used = {node.element_id for node in self._walk(tree.root) if node.node_type == "element" and node.element_id}
-        required = {"title", "subtitle", "main_visual", "cta"} & element_ids
-        missing = required - used
-        unknown = used - element_ids
-        if missing:
-            raise SchemaParseError(f"Layout tree is missing required elements: {sorted(missing)}")
-        if unknown:
-            raise SchemaParseError(f"Layout tree references unknown elements: {sorted(unknown)}")
-
-    def _walk(self, node: LayoutNode) -> list[LayoutNode]:
-        nodes = [node]
-        for child in node.children:
-            nodes.extend(self._walk(child))
-        return nodes
-
-    def _initial_layout(self, state: GraphState) -> LayoutTree:
-        style = state.style
-        if style is None:
-            raise ValueError("style is required before layout planning")
-
-        element_ids = {element.id for element in state.content_plan.elements} if state.content_plan else set()
-        children: list[LayoutNode] = []
-
-        if "main_visual" in element_ids:
-            children.append(
-                LayoutNode(
-                    element_id="main_visual",
-                    box=Box(x=0.08, y=0.25, width=0.84, height=0.42),
-                    style=LayoutStyle(opacity=0.9, radius=0.035),
-                    z_index=1,
-                )
-            )
-        if "title" in element_ids:
-            children.append(
-                LayoutNode(
-                    element_id="title",
-                    box=Box(x=0.08, y=0.08, width=0.84, height=0.12),
-                    style=LayoutStyle(color=style.text_color, font_size=0.052, font_weight="black", align="left"),
-                    z_index=5,
-                )
-            )
-        if "subtitle" in element_ids:
-            children.append(
-                LayoutNode(
-                    element_id="subtitle",
-                    box=Box(x=0.08, y=0.205, width=0.72, height=0.05),
-                    style=LayoutStyle(color=style.accent_color, font_size=0.026, font_weight="medium", align="left"),
-                    z_index=5,
-                )
-            )
-        if "info" in element_ids:
-            children.append(
-                LayoutNode(
-                    element_id="info",
-                    box=Box(x=0.08, y=0.72, width=0.6, height=0.045),
-                    style=LayoutStyle(color=style.text_color, font_size=0.022, font_weight="regular", align="left"),
-                    z_index=5,
-                )
-            )
-        if "cta" in element_ids:
-            children.append(
-                LayoutNode(
-                    element_id="cta",
-                    box=Box(x=0.08, y=0.82, width=0.34, height=0.07),
-                    style=LayoutStyle(
-                        color=style.primary_color,
-                        background_color=style.accent_color,
-                        font_size=0.025,
-                        font_weight="bold",
-                        align="center",
-                        radius=0.04,
-                    ),
-                    z_index=6,
-                )
-            )
-
-        if not children:
-            children.append(
-                LayoutNode(
-                    element_id="title",
-                    box=Box(x=0.08, y=0.08, width=0.84, height=0.12),
-                    style=LayoutStyle(color=style.text_color, font_size=0.052, font_weight="black", align="left"),
-                    z_index=5,
-                )
-            )
-
-        root = LayoutNode(
-            node_type="container",
-            box=Box(x=0, y=0, width=1, height=1),
-            flex=FlexSpec(direction="column"),
-            z_index=0,
-            children=children,
+        return bool(
+            self.llm_client.api_key
+            and self.llm_client.base_url
+            and not self.llm_client.model.startswith("mock-")
         )
-        return LayoutTree(canvas=state.canvas, root=root)
-
-    def _apply_adjustment(self, node: LayoutNode, adjustment: AdjustmentVector) -> bool:
-        if node.node_type == "element" and node.element_id == adjustment.element_id:
-            self._mutate_node(node, adjustment)
-            return True
-        for child in node.children:
-            if self._apply_adjustment(child, adjustment):
-                return True
-        return False
-
-    def _mutate_node(self, node: LayoutNode, adjustment: AdjustmentVector) -> None:
-        if adjustment.action in {AdjustmentAction.move, AdjustmentAction.resize}:
-            x = self._clamp(node.box.x + adjustment.dx, 0, 0.98)
-            y = self._clamp(node.box.y + adjustment.dy, 0, 0.98)
-            width = node.box.width + adjustment.d_width
-            height = (node.box.height or 0.04) + adjustment.d_height
-            if adjustment.scale:
-                width *= adjustment.scale
-                height *= adjustment.scale
-            width = self._clamp(width, 0.03, 1 - x)
-            height = self._clamp(height, 0.02, 1 - y)
-            node.box = Box(x=x, y=y, width=width, height=height)
-        if adjustment.action == AdjustmentAction.recolor and adjustment.new_color:
-            node.style.color = adjustment.new_color
-        if adjustment.action == AdjustmentAction.typography and adjustment.new_font_size:
-            node.style.font_size = adjustment.new_font_size
-        if adjustment.action == AdjustmentAction.z_order:
-            node.z_index = int(self._clamp(node.z_index + adjustment.z_index_delta, 0, 100))
-
-    def _clamp(self, value: float, minimum: float, maximum: float) -> float:
-        return max(minimum, min(maximum, value))

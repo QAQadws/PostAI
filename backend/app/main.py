@@ -4,14 +4,23 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
+from app.api.middleware import RequestLoggingMiddleware
 from app.api.routes_generate import router as generate_router
 from app.core.config import get_settings
+from app.core.logging import setup_logging
 
 
 def create_app() -> FastAPI:
     settings = get_settings()
+
+    setup_logging(
+        log_level=settings.log_level,
+        log_file=settings.log_file or None,
+    )
+
     app = FastAPI(title=settings.app_name, version=settings.app_version)
 
+    app.add_middleware(RequestLoggingMiddleware)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.cors_origins,

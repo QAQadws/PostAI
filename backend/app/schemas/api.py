@@ -12,6 +12,7 @@ class GenerateRequest(BaseModel):
     width: int = Field(default=1024, ge=256, le=4096)
     height: int = Field(default=1536, ge=256, le=4096)
     max_iterations: int = Field(default=3, ge=1, le=5)
+    min_iterations: int = Field(default=0, ge=0, le=4, description="Minimum VLM review cycles before early exit; 0=stop anytime, 1=at least one re-layout")
     target_score: int = Field(default=85, ge=1, le=100)
 
 
@@ -24,6 +25,8 @@ class GenerateResponse(BaseModel):
     content_plan: ContentPlan | None = None
     style: StyleGuide | None = None
     layout_tree: LayoutTree | None = None
+    layout_html: str | None = None
+    html_url: str | None = None
     render_result: RenderResult | None = None
     critiques: list[CritiqueResult] = Field(default_factory=list)
 

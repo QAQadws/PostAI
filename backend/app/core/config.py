@@ -43,6 +43,10 @@ class Settings:
     vision_api_key: str | None = None
     vision_base_url: str | None = None
     vision_model: str = "mock-vision"
+    vision_enable_thinking: bool = True
+    vision_thinking_budget: int = 8192
+    log_level: str = "INFO"
+    log_file: str = ""
 
 
 def get_settings() -> Settings:
@@ -60,4 +64,8 @@ def get_settings() -> Settings:
         vision_api_key=os.getenv("VISION_API_KEY"),
         vision_base_url=os.getenv("VISION_BASE_URL"),
         vision_model=os.getenv("VISION_MODEL", "mock-vision"),
+        vision_enable_thinking=_env_bool("VISION_ENABLE_THINKING", True),
+        vision_thinking_budget=int(os.getenv("VISION_THINKING_BUDGET", "8192")),
+        log_level=os.getenv("LOG_LEVEL", "INFO"),
+        log_file=os.getenv("LOG_FILE", "logs/postai.log"),
     )

@@ -1,13 +1,14 @@
 from app.agents.content_extractor import ContentExtractor
 from app.agents.layout_planner import SpatialLayoutPlanner
 from app.agents.style_director import StyleDirector
-from app.core.errors import LLMCallError
-from app.schemas.agents import ContentPlan, ElementContent, StyleGuide
-from app.schemas.layout import Box, CanvasSpec, ElementType, LayoutNode, LayoutStyle, LayoutTree
+from app.core.errors import LLMCallError, SchemaParseError
+from app.schemas.agents import ContentPlan, ElementContent, CritiqueResult, StyleGuide
+from app.schemas.layout import CanvasSpec, ElementType
 from app.schemas.state import GraphState
 
 
 class FakeLLMClient:
+    """Test double for StructuredLLMClient with controllable outputs."""
     api_key = "key"
     base_url = "https://example.test/v1"
     model = "real-model"
@@ -23,6 +24,14 @@ class FakeLLMClient:
             raise output
         return output
 
+    async def _chat_completion(self, *, messages, response_model, force_raw=False):
+        """Used by Phase 2 LayoutPlanner for raw HTML output."""
+        self.calls += 1
+        output = self.outputs.pop(0)
+        if isinstance(output, Exception):
+            raise output
+        return output
+
 
 class FakeMalformedContentClient:
     api_key = "key"
@@ -31,12 +40,10 @@ class FakeMalformedContentClient:
 
     async def parse(self, *, messages, response_model):
         from app.core.errors import SchemaParseError
-
         raise SchemaParseError("bad schema")
 
-    async def _chat_completion(self, *, messages, response_model):
+    async def _chat_completion(self, *, messages, response_model, force_raw=False):
         import json
-
         return json.dumps(
             {
                 "elements": [
@@ -52,6 +59,8 @@ class FakeMalformedContentClient:
     def validate_payload(self, payload, response_model):
         return response_model.model_validate(payload)
 
+
+# ── ContentExtractor ──
 
 async def test_content_extractor_uses_llm_output():
     llm = FakeLLMClient(
@@ -79,6 +88,8 @@ async def test_content_extractor_normalizes_layout_like_payload():
     assert result.poster_goal
 
 
+# ── StyleDirector ──
+
 async def test_style_director_falls_back_when_llm_fails():
     llm = FakeLLMClient([LLMCallError("network down")])
     state = GraphState(user_prompt="科技海报")
@@ -93,38 +104,20 @@ async def test_style_director_raises_when_fallback_disabled():
     agent.allow_model_fallback = False
     state = GraphState(user_prompt="科技海报")
     import pytest
-
     with pytest.raises(LLMCallError):
         await agent.run(state)
 
 
-async def test_layout_planner_uses_llm_output():
-    tree = LayoutTree(
-        canvas=CanvasSpec(width=512, height=768),
-        root=LayoutNode(
-            node_type="container",
-            box=Box(x=0, y=0, width=1, height=1),
-            children=[
-                LayoutNode(
-                    element_id="title",
-                    box=Box(x=0.1, y=0.1, width=0.8, height=0.1),
-                    style=LayoutStyle(color="#FFFFFF", font_size=0.05, align="left"),
-                ),
-                LayoutNode(
-                    element_id="subtitle",
-                    box=Box(x=0.1, y=0.22, width=0.8, height=0.05),
-                    style=LayoutStyle(color="#FFFFFF", font_size=0.03, align="left"),
-                ),
-                LayoutNode(element_id="main_visual", box=Box(x=0.1, y=0.32, width=0.8, height=0.35)),
-                LayoutNode(
-                    element_id="cta",
-                    box=Box(x=0.1, y=0.8, width=0.3, height=0.08),
-                    style=LayoutStyle(color="#000000", font_size=0.03, align="center"),
-                ),
-            ],
-        ),
-    )
-    llm = FakeLLMClient([tree])
+# ── SpatialLayoutPlanner (Phase 2 — outputs HTML string) ──
+
+_SAMPLE_HTML = """<!DOCTYPE html>
+<html><head><style>
+body { width:512px; height:768px; background:linear-gradient(180deg, #000, #111); }
+.title { color:#FFF; font-size:40px; font-weight:bold; }
+</style></head><body><div class="title">发布会</div></body></html>"""
+
+
+def _state_for_planner() -> GraphState:
     state = GraphState(user_prompt="AI 发布会", canvas=CanvasSpec(width=512, height=768))
     state.content_plan = ContentPlan(
         poster_goal="launch",
@@ -144,6 +137,130 @@ async def test_layout_planner_uses_llm_output():
         text_color="#FFFFFF",
         mood="futuristic",
     )
-    result = await SpatialLayoutPlanner(llm_client=llm).run(state)
+    return state
+
+
+async def test_layout_planner_outputs_html_string():
+    """Phase 2: LLM returns an HTML document string."""
+    llm = FakeLLMClient([_SAMPLE_HTML])
+    result = await SpatialLayoutPlanner(llm_client=llm).run(_state_for_planner())
     assert llm.calls == 1
-    assert result.root.children[0].element_id == "title"
+    assert isinstance(result, str)
+    assert "<!DOCTYPE html>" in result
+    assert "发布会" in result
+
+
+async def test_layout_planner_calls_llm_every_iteration():
+    """Each run() calls the LLM again — no cached plan reuse."""
+    html1 = _SAMPLE_HTML
+    html2 = _SAMPLE_HTML.replace("40px", "60px")  # different
+    llm = FakeLLMClient([html1, html2])
+    planner = SpatialLayoutPlanner(llm_client=llm)
+    state = _state_for_planner()
+
+    result1 = await planner.run(state)
+    assert llm.calls == 1
+    assert "40px" in result1
+
+    state.feedback_history.append(
+        CritiqueResult(score=70, passed=False, reasoning="needs work", issues=["too tight top margin"])
+    )
+
+    result2 = await planner.run(state)
+    assert llm.calls == 2, "Second iteration must call LLM again"
+    assert "60px" in result2
+
+
+async def test_layout_planner_falls_back_when_llm_fails():
+    llm = FakeLLMClient([LLMCallError("network down")])
+    state = _state_for_planner()
+    result = await SpatialLayoutPlanner(llm_client=llm).run(state)
+    assert isinstance(result, str)
+    assert "<!DOCTYPE html>" in result
+    assert state.warnings
+
+
+async def test_layout_planner_raises_when_fallback_disabled():
+    llm = FakeLLMClient([LLMCallError("network down")])
+    planner = SpatialLayoutPlanner(llm_client=llm)
+    planner.allow_model_fallback = False
+    import pytest
+    with pytest.raises(LLMCallError):
+        await planner.run(_state_for_planner())
+
+
+async def test_layout_planner_strips_markdown_fences():
+    """When LLM wraps HTML in ```html fences, extract it."""
+    fenced = '```html\n' + _SAMPLE_HTML + '\n```'
+    llm = FakeLLMClient([fenced])
+    result = await SpatialLayoutPlanner(llm_client=llm).run(_state_for_planner())
+    assert not result.startswith("```")
+    assert "<!DOCTYPE html>" in result
+
+
+# ── Phase 3: HTML validation ──
+
+
+def test_validate_html_accepts_valid_html():
+    """_validate_html passes for reasonable HTML documents."""
+    planner = SpatialLayoutPlanner()
+    # Should not raise.
+    planner._validate_html(_SAMPLE_HTML)
+    planner._validate_html("<html><body><h1>Hello World, This is a Poster Title</h1></body></html>")
+
+
+def test_validate_html_rejects_missing_tags():
+    """_validate_html rejects content that lacks <body> or <html>."""
+    import pytest
+    planner = SpatialLayoutPlanner()
+    with pytest.raises(SchemaParseError, match="body"):
+        planner._validate_html("just some text, no html tags")
+
+
+def test_validate_html_rejects_too_short():
+    """_validate_html rejects content under 50 chars even with body tag."""
+    import pytest
+    planner = SpatialLayoutPlanner()
+    with pytest.raises(SchemaParseError, match="too short"):
+        planner._validate_html("<html><body><h1>Hi</h1></body></html>")
+
+
+# ── Phase 3: feedback injection ──
+
+
+async def test_layout_planner_includes_feedback_in_prompt():
+    """When state has feedback_history, the LLM prompt includes VLM context."""
+    # We verify this indirectly: with two LLM calls, feedback changes the
+    # second output.  This is already covered by test_layout_planner_calls_llm_every_iteration,
+    # but we add an explicit check here that the feedback text is built.
+    planner = SpatialLayoutPlanner()
+    state = _state_for_planner()
+    state.feedback_history.append(
+        CritiqueResult(
+            score=65, passed=False, reasoning="spacing off",
+            vision_description="Dark poster, white text at top",
+            issues=["Title too close to edge"],
+            suggestions=["Move title down by 0.05", "Add padding around text"],
+        )
+    )
+    messages = planner._build_messages(state)
+    user_content = messages[1]["content"]
+    assert "Feedback from VLM review" in user_content
+    assert "Title too close to edge" in user_content
+    assert "Move title down" in user_content
+    assert "What the vision model saw" in user_content
+    assert "32px" not in user_content  # vision_reasoning not set
+
+
+async def test_layout_planner_includes_vision_reasoning_in_feedback():
+    """vision_reasoning from VLM is included in the feedback prompt."""
+    planner = SpatialLayoutPlanner()
+    state = _state_for_planner()
+    state.vision_reasoning = "I see a dark poster with tight margins..."
+    state.feedback_history.append(
+        CritiqueResult(score=70, passed=False, reasoning="tight", issues=["margin too small"])
+    )
+    messages = planner._build_messages(state)
+    user_content = messages[1]["content"]
+    assert "Vision model reasoning:" in user_content
+    assert "dark poster with tight margins" in user_content

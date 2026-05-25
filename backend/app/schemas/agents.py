@@ -33,33 +33,23 @@ class StyleGuide(BaseModel):
     mood: str
 
 
-class AdjustmentAction(str, Enum):
-    move = "move"
-    resize = "resize"
-    recolor = "recolor"
-    typography = "typography"
-    z_order = "z_order"
-    regenerate_background = "regenerate_background"
-
-
-class AdjustmentVector(BaseModel):
-    element_id: str | None = None
-    action: AdjustmentAction
-    dx: float = Field(default=0, ge=-1, le=1)
-    dy: float = Field(default=0, ge=-1, le=1)
-    d_width: float = Field(default=0, ge=-1, le=1)
-    d_height: float = Field(default=0, ge=-1, le=1)
-    scale: float | None = Field(default=None, gt=0, le=3)
-    new_color: str | None = None
-    new_font_size: float | None = Field(default=None, gt=0)
-    z_index_delta: int = Field(default=0, ge=-20, le=20)
-    reason: str
-
-
 class CritiqueResult(BaseModel):
+    """Phase 2 critique — pure natural-language feedback.
+
+    The VLM describes what it sees, lists issues, and gives actionable
+    suggestions in human language.
+    """
+
     score: int = Field(ge=0, le=100)
     passed: bool
     reasoning: str
+    vision_description: str = Field(
+        default="",
+        description="Literal description of what the vision model sees in the rendered poster",
+    )
     issues: list[str] = Field(default_factory=list)
-    adjustments: list[AdjustmentVector] = Field(default_factory=list)
+    suggestions: list[str] = Field(
+        default_factory=list,
+        description="Natural-language actionable suggestions for the layout planner",
+    )
 

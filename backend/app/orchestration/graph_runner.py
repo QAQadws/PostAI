@@ -18,6 +18,7 @@ from app.core.events import SSEEvent, event
 from app.orchestration.retry import retry_async
 from app.orchestration.router import RouteAction, route_after_critique
 from app.render.asset_store import AssetStore
+from app.render.html_painter import apply_canvas_guard
 from app.schemas.api import GenerateResponse
 from app.schemas.state import GraphStage, GraphState
 
@@ -74,6 +75,11 @@ class GraphRunner:
                 state.stage = GraphStage.layout
                 yield event("agent_start", {"job_id": state.job_id, "agent": "SpatialLayoutPlanner", "message": "Designing poster HTML/CSS"})
                 state.layout_html = await retry_async(lambda: self.layout_planner.run(state), attempts=3)
+                state.layout_html = apply_canvas_guard(
+                    state.layout_html,
+                    width=state.canvas.width,
+                    height=state.canvas.height,
+                )
                 # Persist the HTML source alongside the rendered PNG.
                 state.html_url = await self.asset_store.save_html(
                     state.layout_html, job_id=state.job_id, iteration=state.iteration_count
@@ -124,6 +130,11 @@ class GraphRunner:
                     yield event("agent_start", {"job_id": state.job_id, "agent": "StyleDirector", "message": decision.reason})
                     state.style = await retry_async(lambda: self.style_director.run(state), attempts=3)
                     yield event("agent_complete", {"job_id": state.job_id, "agent": "StyleDirector", "result": state.style.model_dump(mode="json")})
+                elif decision.action == RouteAction.content:
+                    state.stage = GraphStage.content
+                    yield event("agent_start", {"job_id": state.job_id, "agent": "ContentExtractor", "message": decision.reason})
+                    state.content_plan = await retry_async(lambda: self.content_extractor.run(state), attempts=3)
+                    yield event("agent_complete", {"job_id": state.job_id, "agent": "ContentExtractor", "result": state.content_plan.model_dump(mode="json")})
 
             # ── Finalise ──
             state.stage = GraphStage.final
@@ -164,6 +175,8 @@ class GraphRunner:
             score=latest.score if latest else None,
             warnings=state.warnings,
             content_plan=state.content_plan,
+            poster_brief=state.poster_brief,
+            art_direction=state.art_direction,
             style=state.style,
             layout_tree=state.layout_tree,
             layout_html=state.layout_html,

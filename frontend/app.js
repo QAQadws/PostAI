@@ -12,6 +12,7 @@ const promptEl = document.getElementById("prompt");
 const widthEl = document.getElementById("width");
 const heightEl = document.getElementById("height");
 const maxIterationsEl = document.getElementById("maxIterations");
+const minIterationsEl = document.getElementById("minIterations");
 const targetScoreEl = document.getElementById("targetScore");
 const addReferenceBtn = document.getElementById("addReferenceBtn");
 const referenceListEl = document.getElementById("referenceList");
@@ -175,10 +176,11 @@ async function collectReferenceImages() {
 function getPayload() {
   const referenceImages = collectReferenceImages();
   return {
-    prompt: promptEl.value.trim() || "制作一张科技风 AI 会议海报",
+    prompt: promptEl.value.trim() || "做一张当代艺术展海报，极简、不要按钮",
     width: Number(widthEl.value) || 768,
     height: Number(heightEl.value) || 1152,
     max_iterations: Number(maxIterationsEl.value) || 2,
+    min_iterations: Number(minIterationsEl.value) || 0,
     target_score: Number(targetScoreEl.value) || 85,
     reference_images: referenceImages,
   };
@@ -355,6 +357,19 @@ async function runStream() {
     setRunning(false);
   }
 }
+
+// ── Preset buttons ──
+
+document.querySelectorAll(".preset-btn").forEach((btn) => {
+  btn.addEventListener("click", () => {
+    const promptText = btn.dataset.prompt;
+    if (promptText) {
+      promptEl.value = promptText;
+    }
+  });
+});
+
+// ── Wire up entries ──
 
 healthBtn.addEventListener("click", checkHealth);
 generateBtn.addEventListener("click", runGenerate);

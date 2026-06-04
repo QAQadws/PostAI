@@ -18,6 +18,7 @@ async def test_graph_runner_produces_final_output(tmp_path):
     assert response.final_image
     assert response.image_url
     assert response.score is not None
+    assert response.generated_illustrations == []
     # Phase 2: layout_html is set by the layout planner.
     assert response.layout_html is not None
     assert "<!DOCTYPE html>" in response.layout_html

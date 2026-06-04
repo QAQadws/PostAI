@@ -159,10 +159,25 @@ class StructuredLLMClient:
             async with httpx.AsyncClient(timeout=self.timeout) as client:
                 response = await client.post(url, headers=headers, json=payload)
                 response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            elapsed = (time.perf_counter() - start) * 1000
+            body = exc.response.text[:1000] if exc.response is not None else ""
+            logger.error(
+                "<-- LLM FAIL | %s | duration=%.1fms | status=%s | error=%s | body=%s",
+                url,
+                elapsed,
+                exc.response.status_code if exc.response is not None else "?",
+                exc.__class__.__name__,
+                body,
+            )
+            raise LLMCallError(
+                f"LLM request failed with HTTP {exc.response.status_code}: {body}"
+            ) from exc
         except httpx.HTTPError as exc:
             elapsed = (time.perf_counter() - start) * 1000
-            logger.error("<-- LLM FAIL | %s | duration=%.1fms | error=%s", url, elapsed, exc)
-            raise LLMCallError(f"LLM request failed: {exc}") from exc
+            detail = str(exc) or exc.__class__.__name__
+            logger.error("<-- LLM FAIL | %s | duration=%.1fms | error=%s", url, elapsed, detail)
+            raise LLMCallError(f"LLM request failed: {detail}") from exc
 
         elapsed = (time.perf_counter() - start) * 1000
         data = response.json()

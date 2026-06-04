@@ -1,11 +1,19 @@
 """Tests for HTMLPainter — Phase 1."""
 
 import base64
+from io import BytesIO
 
 import pytest
+from PIL import Image
 
+from app.core.config import PROJECT_ROOT, resolve_asset_dir
 from app.core.errors import RenderError
-from app.render.html_painter import HTMLPainter, _build_fallback_html, apply_canvas_guard
+from app.render.html_painter import (
+    HTMLPainter,
+    _build_fallback_html,
+    apply_canvas_guard,
+    resolve_local_asset_urls,
+)
 
 _MINIMAL_HTML = "<!DOCTYPE html><html><body>Hello</body></html>"
 _STYLED_HTML = """<!DOCTYPE html>
@@ -106,6 +114,34 @@ def test_canvas_guard_overrides_responsive_body_scale():
     assert guarded.index("postai-canvas-guard") > guarded.index("@media")
 
 
+def test_resolve_local_asset_urls_embeds_public_assets_as_data_urls(tmp_path, monkeypatch):
+    monkeypatch.setenv("ASSET_DIR", str(tmp_path))
+    monkeypatch.setenv("ASSET_URL_PATH", "/assets")
+    image_dir = tmp_path / "generated_illustrations"
+    image_dir.mkdir()
+    Image.new("RGB", (1, 1), (255, 0, 0)).save(image_dir / "a.png")
+
+    html = (
+        '<img src="/assets/generated_illustrations/a.png">'
+        "<div style=\"background-image:url('/assets/generated_illustrations/a.png')\"></div>"
+        '<img src="https://example.test/c.png">'
+    )
+
+    resolved = resolve_local_asset_urls(html)
+
+    assert 'src="data:image/png;base64,' in resolved
+    assert "url('data:image/png;base64," in resolved
+    assert "/assets/generated_illustrations/a.png" not in resolved
+    assert "https://example.test/c.png" in resolved
+
+
+def test_resolve_local_asset_urls_resolves_relative_asset_dir_from_project_root(monkeypatch):
+    monkeypatch.setenv("ASSET_DIR", "generated")
+    monkeypatch.setenv("ASSET_URL_PATH", "/assets")
+
+    assert resolve_asset_dir() == PROJECT_ROOT / "generated"
+
+
 # ── HTMLPainter.render ──
 
 
@@ -127,6 +163,31 @@ async def test_render_styled_html():
     assert result.image_base64
     assert result.width == 400
     assert result.height == 600
+
+
+async def test_render_loads_public_asset_urls_from_local_asset_dir(tmp_path, monkeypatch):
+    monkeypatch.setenv("ASSET_DIR", str(tmp_path))
+    monkeypatch.setenv("ASSET_URL_PATH", "/assets")
+    image_dir = tmp_path / "generated_illustrations"
+    image_dir.mkdir()
+    Image.new("RGB", (64, 64), (255, 0, 0)).save(image_dir / "red.png")
+
+    html = """<!DOCTYPE html>
+<html>
+<head><style>
+  body { margin:0; width:64px; height:64px; background:#000; overflow:hidden; }
+  img { display:block; width:64px; height:64px; object-fit:cover; }
+</style></head>
+<body><img src="/assets/generated_illustrations/red.png"></body>
+</html>"""
+
+    result = await HTMLPainter().render(html, width=64, height=64)
+    rendered = Image.open(BytesIO(base64.b64decode(result.image_base64))).convert("RGB")
+    red, green, blue = rendered.getpixel((32, 32))
+
+    assert red > 220
+    assert green < 40
+    assert blue < 40
 
 
 async def test_render_respects_dimensions():

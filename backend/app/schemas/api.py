@@ -4,7 +4,7 @@ from pydantic import BaseModel, Field, model_validator
 
 from app.schemas.agents import ArtDirectionV2, ContentPlan, CritiqueResult, PosterBriefV2, StyleGuide
 from app.schemas.layout import LayoutTree
-from app.schemas.state import ReferenceImage, RenderResult
+from app.schemas.state import GeneratedIllustration, ReferenceImage, RenderResult
 
 
 class GenerateRequest(BaseModel):
@@ -18,6 +18,16 @@ class GenerateRequest(BaseModel):
         default_factory=list,
         max_length=5,
         description="Optional references used as layout/style context and embeddable image URLs",
+    )
+    enable_generated_illustrations: bool = Field(
+        default=True,
+        description="Allow the illustration agent to generate AI illustration assets for the poster",
+    )
+    max_generated_illustrations: int = Field(
+        default=3,
+        ge=0,
+        le=5,
+        description="Maximum number of AI-generated illustration assets to create",
     )
 
 
@@ -48,6 +58,7 @@ class GenerateResponse(BaseModel):
     layout_html: str | None = None
     html_url: str | None = None
     render_result: RenderResult | None = None
+    generated_illustrations: list[GeneratedIllustration] = Field(default_factory=list)
     critiques: list[CritiqueResult] = Field(default_factory=list)
 
 
@@ -79,4 +90,3 @@ class RefineResponse(BaseModel):
     final_image: str | None = None
     warnings: list[str] = Field(default_factory=list)
     critique: CritiqueResult | None = None
-

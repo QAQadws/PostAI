@@ -14,6 +14,8 @@ const heightEl = document.getElementById("height");
 const maxIterationsEl = document.getElementById("maxIterations");
 const minIterationsEl = document.getElementById("minIterations");
 const targetScoreEl = document.getElementById("targetScore");
+const enableIllustrationsEl = document.getElementById("enableIllustrations");
+const maxIllustrationsEl = document.getElementById("maxIllustrations");
 const addReferenceBtn = document.getElementById("addReferenceBtn");
 const referenceListEl = document.getElementById("referenceList");
 
@@ -174,7 +176,6 @@ async function collectReferenceImages() {
 }
 
 function getPayload() {
-  const referenceImages = collectReferenceImages();
   return {
     prompt: promptEl.value.trim() || "做一张当代艺术展海报，极简、不要按钮",
     width: Number(widthEl.value) || 768,
@@ -182,7 +183,9 @@ function getPayload() {
     max_iterations: Number(maxIterationsEl.value) || 2,
     min_iterations: Number(minIterationsEl.value) || 0,
     target_score: Number(targetScoreEl.value) || 85,
-    reference_images: referenceImages,
+    enable_generated_illustrations: enableIllustrationsEl.checked,
+    max_generated_illustrations: Number(maxIllustrationsEl.value) || 0,
+    reference_images: [],
   };
 }
 
@@ -260,6 +263,7 @@ async function runGenerate() {
 
     const data = await resp.json();
     appendLog(`生成完成: job_id=${data.job_id}, score=${data.score ?? "N/A"}`);
+    appendLog(`生成插图数量: ${data.generated_illustrations?.length || 0}`);
     updateCurrentState(data);
 
     if (data.image_url) {
@@ -338,6 +342,14 @@ async function runStream() {
 
         appendLog(`SSE(${eventName}): ${Object.keys(payload).join(", ")}`);
 
+        if (eventName === "warning" && payload.message) {
+          appendLog(`警告: ${payload.message}`);
+        }
+
+        if (eventName === "error" && payload.message) {
+          appendLog(`错误(${payload.stage || "unknown"}): ${payload.message}`);
+        }
+
         if (eventName === "render_preview" && payload.image_url) {
           renderPreviewFromImageUrl(payload.image_url);
           updateCurrentState(payload);
@@ -350,6 +362,7 @@ async function runStream() {
             renderPreviewFromBase64(payload.final_image);
           }
           updateCurrentState(payload);
+          appendLog(`生成插图数量: ${payload.generated_illustrations?.length || 0}`);
           appendLog(`流式生成完成: score=${payload.score ?? "N/A"}`);
         }
       }

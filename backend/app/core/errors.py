@@ -14,6 +14,9 @@ class VisionCallError(PostAIError):
     """Raised when a vision model call fails."""
 
 
+class ImageGenerationError(PostAIError):
+    """Raised when an image generation model call fails."""
+
+
 class RenderError(PostAIError):
     """Raised when rendering fails."""
-

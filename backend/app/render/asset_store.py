@@ -8,6 +8,7 @@ from uuid import uuid4
 
 from PIL import Image, UnidentifiedImageError
 
+from app.core.config import resolve_asset_dir
 from app.core.errors import RenderError
 from app.schemas.state import RenderResult
 
@@ -19,7 +20,7 @@ class AssetStore:
     """
 
     def __init__(self, base_dir: str | Path = "generated", public_path: str = "/assets") -> None:
-        self.base_dir = Path(base_dir)
+        self.base_dir = resolve_asset_dir(base_dir)
         self.public_path = public_path.rstrip("/")
 
     def _safe_job_id(self, job_id: str) -> str:
@@ -72,11 +73,39 @@ class AssetStore:
         try:
             with Image.open(BytesIO(image_bytes)) as image:
                 image.verify()
-        except (UnidentifiedImageError, OSError) as exc:
+        except (UnidentifiedImageError, OSError, SyntaxError) as exc:
             raise RenderError("uploaded file is not a valid image") from exc
 
         target.write_bytes(image_bytes)
         return f"{self.public_path}/reference_uploads/{target_name}"
+
+    async def save_generated_illustration(
+        self,
+        image_bytes: bytes,
+        *,
+        job_id: str,
+        illustration_id: str,
+        mime_type: str,
+    ) -> str:
+        """Persist an AI-generated illustration image and return its public URL."""
+        self.base_dir.mkdir(parents=True, exist_ok=True)
+        generated_dir = self.base_dir / "generated_illustrations"
+        generated_dir.mkdir(parents=True, exist_ok=True)
+
+        job_id = self._safe_job_id(job_id)
+        safe_illustration_id = re.sub(r"[^A-Za-z0-9_-]+", "-", illustration_id).strip("-") or "illustration"
+        extension = _extension_from_mime(mime_type)
+        target_name = f"{job_id}_{safe_illustration_id}_{uuid4().hex[:8]}{extension}"
+        target = generated_dir / target_name
+
+        try:
+            with Image.open(BytesIO(image_bytes)) as image:
+                image.verify()
+        except (UnidentifiedImageError, OSError, SyntaxError) as exc:
+            raise RenderError("generated illustration is not a valid image") from exc
+
+        target.write_bytes(image_bytes)
+        return f"{self.public_path}/generated_illustrations/{target_name}"
 
 
     async def load_html_by_url(self, html_url: str) -> str:

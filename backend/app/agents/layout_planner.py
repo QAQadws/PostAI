@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import re
+from urllib.parse import quote
 
 from app.core.config import get_settings
 from app.core.errors import LLMCallError, SchemaParseError
@@ -55,7 +56,8 @@ class SpatialLayoutPlanner:
                 raise
             if self._configured_for_llm():
                 state.warnings.append(f"SpatialLayoutPlanner LLM fallback: {exc}")
-            return self._run_fallback(state)
+            html = self._run_fallback(state)
+            return self._ensure_visual_assets_are_used(html, state)
 
     # ── LLM path (Phase 4 — PosterBriefV2 + ArtDirectionV2) ──
 
@@ -73,6 +75,7 @@ class SpatialLayoutPlanner:
         )
         html = self._extract_html(content)
         self._validate_html(html)
+        html = self._ensure_visual_assets_are_used(html, state)
         return html
 
     def _build_messages(self, state: GraphState) -> list[dict]:
@@ -142,6 +145,15 @@ class SpatialLayoutPlanner:
         omission_text = "\n".join(omission_lines) if omission_lines else "(no presence rules — use your best judgement)"
 
         # ── System prompt (Phase 4 V2) ──
+        available_assets = self._available_visual_assets(state)
+        has_real_assets = bool(available_assets)
+        if has_real_assets:
+            asset_requirement_text = (
+                "- REAL ASSET REQUIREMENT: because usable image assets are provided, you MUST embed at least one real asset URL from the provided asset lists in the final HTML. "
+                "Do NOT replace all provided assets with inline SVG, placeholders, or purely invented graphics.\n"
+            )
+        else:
+            asset_requirement_text = "- If no real asset URL is provided, you may use inline SVG or placeholder imagery.\n"
         system = (
             "You are a senior poster designer and HTML/CSS production artist.\n"
             "Output one complete self-contained HTML document, starting with "
@@ -179,8 +191,8 @@ class SpatialLayoutPlanner:
             "poster concept explicitly calls for them.\n"
             "- Prefer robust system font stacks for Chinese text. "
             "Google Fonts @import is optional.\n"
-            "- For images, use inline SVG or placeholder images "
-            "(e.g. https://placehold.co/600x400/EEE/31343C).\n"
+            "- For images, use provided generated illustration or reference asset URLs when appropriate; "
+            "use inline SVG or placeholder images only when no real asset is available.\n"
             "- Ensure text is readable unless the brief intentionally asks "
             "for experimental illegibility.\n\n"
             "POSTER RICHNESS BUDGET:\n"
@@ -200,10 +212,19 @@ class SpatialLayoutPlanner:
             + (f"\n  notes: {color_notes}" if color_notes else "") + "\n\n"
             f"{comp_hints}\n"
             "IMAGES:\n"
-            "- Use reference image URLs only when the brief/art direction calls for them.\n"
+            "- Distinguish user reference images from AI-generated illustration assets.\n"
+            "- Prefer AI-generated illustration assets as actual poster visual content when they fit the composition.\n"
+            "- Use user reference images mainly as guidance or only when the brief/art direction explicitly calls for them.\n"
+            + asset_requirement_text
+            +
             "- Use object-fit and intentional cropping. Keep each image within "
             "15%-35% of canvas area, maintain safe margins, avoid covering "
             "required text.\n"
+            "- If you use a generated illustration asset, render it via <img> or CSS background-image "
+            "and give the element a stable id in the form generated-illustration-{asset.id}.\n"
+            "- If you use a user reference image as the visible poster visual, render it via <img> or CSS background-image "
+            "and give the element a stable id in the form reference-image-{n}.\n"
+            "- Do NOT force every image asset into the poster; use only the ones that strengthen the layout.\n"
             "- If no image is needed, make the poster work through type, shape, "
             "colour, or texture.\n\n"
             "STABLE ELEMENT IDs (required for future refinement):\n"
@@ -253,6 +274,40 @@ class SpatialLayoutPlanner:
             user_parts.append(
                 "Reference images (available for <img> or CSS background-image "
                 "if the brief calls for them):\n" + "\n".join(refs)
+            )
+
+        if state.generated_illustrations:
+            generated_assets = []
+            for asset in state.generated_illustrations:
+                if asset.status != "generated" or not asset.url:
+                    continue
+                generated_assets.append(
+                    f"- id={asset.id}, source={asset.source_visual_subject_id or 'none'}, "
+                    f"status={asset.status}, url={asset.url or 'none'}, "
+                    f"description={asset.description}, placement_hint={asset.placement_hint}, "
+                    f"usage_guidance={asset.usage_guidance}"
+                )
+            if generated_assets:
+                user_parts.append("")
+                user_parts.append(
+                    "AI-generated illustration assets (prefer these over generic placeholders when suitable):\n"
+                    + "\n".join(generated_assets)
+                )
+
+        if available_assets:
+            preferred_lines = [
+                f"- priority={asset['priority']} id={asset['id']} kind={asset['kind']} url={asset['url']} "
+                f"description={asset['description']}"
+                for asset in available_assets
+            ]
+            user_parts.append("")
+            user_parts.append(
+                "Preferred visual asset order (choose from top to bottom; use the first one unless composition would clearly be worse):\n"
+                + "\n".join(preferred_lines)
+            )
+            user_parts.append("")
+            user_parts.append(
+                "Asset usage rule: if you decide to omit the first preferred asset, you must still use another provided real asset URL in the HTML."
             )
 
         user_parts.append("")
@@ -316,6 +371,114 @@ class SpatialLayoutPlanner:
             raise SchemaParseError("HTML output must contain a <body> or <html> tag")
         if len(html) < 50:
             raise SchemaParseError("HTML output is too short to be a valid poster document")
+
+    def _available_visual_assets(self, state: GraphState) -> list[dict[str, str | int]]:
+        assets: list[dict[str, str | int]] = []
+        for asset in state.generated_illustrations:
+            if asset.status == "generated" and asset.url:
+                assets.append({
+                    "priority": 1,
+                    "id": asset.id,
+                    "kind": "generated",
+                    "url": asset.url,
+                    "description": asset.description,
+                })
+        for index, image in enumerate(state.reference_images, start=1):
+            assets.append({
+                "priority": 2,
+                "id": f"reference-image-{index}",
+                "kind": "reference",
+                "url": image.url,
+                "description": image.description,
+            })
+        return assets
+
+    def _ensure_visual_assets_are_used(self, html: str, state: GraphState) -> str:
+        assets = self._available_visual_assets(state)
+        if not assets:
+            return html
+        if not self._should_require_real_asset(state):
+            return html
+        if self._html_uses_any_asset(html, assets):
+            return html
+
+        preferred_asset = assets[0]
+        state.warnings.append(
+            f"SpatialLayoutPlanner output omitted provided visual assets; injected fallback asset {preferred_asset['id']}"
+        )
+        return self._inject_asset_visual(html, preferred_asset, state)
+
+    def _should_require_real_asset(self, state: GraphState) -> bool:
+        brief = state.poster_brief
+        if brief is None:
+            return bool(state.reference_images or state.generated_illustrations)
+        if brief.content_strategy.image_policy == "omit":
+            return False
+        if any(vs.presence == "required" and vs.role != "none" for vs in brief.visual_subjects):
+            return True
+        return bool(state.reference_images or state.generated_illustrations)
+
+    def _html_uses_any_asset(self, html: str, assets: list[dict[str, str | int]]) -> bool:
+        return any(str(asset["url"]) in html for asset in assets)
+
+    def _inject_asset_visual(self, html: str, asset: dict[str, str | int], state: GraphState) -> str:
+        asset_id = str(asset["id"])
+        asset_url = str(asset["url"])
+        visual_id = (
+            f"generated-illustration-{asset_id}"
+            if asset.get("kind") == "generated" and not asset_id.startswith("generated-illustration-")
+            else asset_id
+        )
+        alt_text = self._escape_attr(str(asset["description"]))
+        style_block = (
+            "<style>\n"
+            "/* injected asset fallback */\n"
+            f"#{visual_id}.injected-asset-visual {{\n"
+            "  position:absolute;\n"
+            "  inset:18% 10% 18% 10%;\n"
+            "  overflow:hidden;\n"
+            "  border-radius:10px;\n"
+            "  box-shadow:0 28px 70px rgba(0,0,0,0.38);\n"
+            "  z-index:2;\n"
+            "}\n"
+            f"#{visual_id}.injected-asset-visual img,\n"
+            f"#{visual_id}.injected-asset-visual .asset-image {{\n"
+            "  width:100%;\n"
+            "  height:100%;\n"
+            "  object-fit:cover;\n"
+            "  display:block;\n"
+            "}\n"
+            f"#{visual_id}.injected-asset-visual::after {{\n"
+            "  content:'';\n"
+            "  position:absolute;\n"
+            "  inset:0;\n"
+            "  background:linear-gradient(180deg, rgba(0,0,0,0.08), rgba(0,0,0,0.26));\n"
+            "  pointer-events:none;\n"
+            "}\n"
+            "</style>"
+        )
+        visual_block = (
+            f'<div id="{self._escape_attr(visual_id)}" class="injected-asset-visual" data-role="visual" '
+            f'data-asset-id="{self._escape_attr(asset_id)}">'
+            f'<img class="asset-image" '
+            f'src="{self._escape_attr(asset_url)}" alt="{alt_text}" /></div>'
+        )
+
+        if "</head>" in html:
+            html = html.replace("</head>", style_block + "\n</head>", 1)
+        elif "<body" in html:
+            html = html.replace("<body", "<head>" + style_block + "</head><body", 1)
+        else:
+            html = style_block + html
+
+        body_close = re.search(r"</body\s*>", html, flags=re.IGNORECASE)
+        if body_close:
+            insert_at = body_close.start()
+            return html[:insert_at] + visual_block + "\n" + html[insert_at:]
+        return html + visual_block
+
+    def _escape_attr(self, value: str) -> str:
+        return quote(value, safe="/:#?&=%@,+-_.~")
 
     # ── fallback (Phase 4 — reads poster_brief for presence rules) ──
 

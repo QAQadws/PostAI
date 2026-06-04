@@ -46,6 +46,8 @@ def _state_from_request(request: GenerateRequest) -> GraphState:
         min_iterations=request.min_iterations,
         target_score=request.target_score,
         reference_images=request.reference_images,
+        enable_generated_illustrations=request.enable_generated_illustrations,
+        max_generated_illustrations=request.max_generated_illustrations,
     )
 
 

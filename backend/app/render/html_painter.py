@@ -18,10 +18,14 @@ from __future__ import annotations
 import asyncio
 import base64
 from html import escape
+import mimetypes
 import re
+from urllib.parse import unquote, urlsplit
 
+from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from playwright.sync_api import sync_playwright
 
+from app.core.config import get_settings, resolve_asset_dir
 from app.core.errors import RenderError
 from app.schemas.state import RenderResult
 
@@ -412,6 +416,7 @@ class HTMLPainter:
         if not sanitised:
             raise RenderError("HTML string is empty — nothing to render")
         guarded_html = apply_canvas_guard(sanitised, width=width, height=height)
+        render_html = resolve_local_asset_urls(guarded_html)
 
         def _render_sync() -> RenderResult:
             console_errors: list[str] = []
@@ -425,7 +430,16 @@ class HTMLPainter:
                             console_errors.append(f"[{msg.type}] {msg.text}")
 
                     page.on("console", _on_console)
-                    page.set_content(guarded_html, wait_until="networkidle")
+                    page.set_content(render_html, wait_until="domcontentloaded", timeout=15_000)
+                    try:
+                        page.wait_for_function(
+                            """() => Array.from(document.images)
+                                .filter((img) => img.currentSrc.startsWith('data:'))
+                                .every((img) => img.complete && img.naturalWidth > 0)""",
+                            timeout=5_000,
+                        )
+                    except PlaywrightTimeoutError:
+                        console_errors.append("[warning] embedded image assets did not finish loading before capture")
                     screenshot = page.screenshot(full_page=False)
                 except Exception as exc:
                     raise RenderError(f"Playwright rendering failed: {exc}") from exc
@@ -442,3 +456,68 @@ class HTMLPainter:
             )
 
         return await asyncio.to_thread(_render_sync)
+
+
+def resolve_local_asset_urls(html: str) -> str:
+    """Make app-served asset URLs loadable when Playwright uses set_content().
+
+    Saved HTML should keep public URLs such as ``/assets/foo.png`` so users can
+    open it through the backend. During screenshot rendering, however,
+    ``page.set_content`` has no backend origin, so root-relative ``/assets``
+    URLs are not fetchable. Rewriting only the render copy to ``data:`` URLs
+    keeps persisted HTML user-friendly while letting Chromium load local assets
+    without depending on a running static server or file URL permissions.
+    """
+    settings = get_settings()
+    public_path = settings.asset_url_path.rstrip("/")
+    if not public_path or public_path == "/":
+        return html
+
+    asset_root = resolve_asset_dir(settings.asset_dir)
+
+    quoted_pattern = re.compile(
+        rf"(?P<quote>['\"])(?P<url>{re.escape(public_path)}/[^'\"]+)(?P=quote)"
+    )
+
+    def replace_quoted(match: re.Match[str]) -> str:
+        quote = match.group("quote")
+        url = match.group("url")
+        data_url = _asset_url_to_data_url(url, asset_root=asset_root, public_path=public_path)
+        return f"{quote}{data_url or url}{quote}"
+
+    result = quoted_pattern.sub(replace_quoted, html)
+
+    css_url_pattern = re.compile(
+        rf"url\((?P<url>{re.escape(public_path)}/[^\)\s]+)\)",
+        flags=re.IGNORECASE,
+    )
+
+    def replace_css_url(match: re.Match[str]) -> str:
+        url = match.group("url")
+        data_url = _asset_url_to_data_url(url, asset_root=asset_root, public_path=public_path)
+        return f"url({data_url or url})"
+
+    return css_url_pattern.sub(replace_css_url, result)
+
+
+def _asset_url_to_data_url(url: str, *, asset_root, public_path: str) -> str | None:
+    if not url.startswith(public_path + "/"):
+        return None
+
+    relative_url = url[len(public_path):].lstrip("/")
+    relative_path = unquote(urlsplit(relative_url).path)
+    if not relative_path or ".." in relative_path or relative_path.startswith("/") or "\\" in relative_path:
+        return None
+
+    base = asset_root.resolve()
+    target = (base / relative_path).resolve()
+    try:
+        target.relative_to(base)
+    except ValueError:
+        return None
+    if not target.is_file():
+        return None
+
+    mime_type = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
+    encoded = base64.b64encode(target.read_bytes()).decode("ascii")
+    return f"data:{mime_type};base64,{encoded}"

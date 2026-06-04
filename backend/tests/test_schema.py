@@ -1,8 +1,9 @@
 import pytest
 from pydantic import ValidationError
 
+from app.schemas.api import GenerateRequest
 from app.schemas.layout import Box, LayoutNode, LayoutTree
-from app.schemas.state import GraphState
+from app.schemas.state import GeneratedIllustration, GraphState
 
 
 def test_graph_state_defaults_are_isolated():
@@ -34,3 +35,27 @@ def test_layout_tree_supports_nested_container():
 def test_box_rejects_out_of_bounds_values():
     with pytest.raises(ValidationError):
         Box(x=0.8, y=0.1, width=0.3, height=0.2)
+
+
+def test_generate_request_generated_illustration_defaults():
+    request = GenerateRequest(prompt="海报")
+    assert request.enable_generated_illustrations is True
+    assert request.max_generated_illustrations == 3
+
+
+def test_generate_request_rejects_too_many_generated_illustrations():
+    with pytest.raises(ValidationError):
+        GenerateRequest(prompt="海报", max_generated_illustrations=6)
+
+
+def test_generated_illustration_accepts_failed_status():
+    item = GeneratedIllustration(
+        id="main-visual",
+        source_visual_subject_id="main_visual",
+        description="robot illustration",
+        prompt="draw a robot",
+        status="failed",
+        error="provider unavailable",
+    )
+    assert item.status == "failed"
+    assert item.url is None

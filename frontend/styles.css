@@ -233,6 +233,35 @@ input:focus {
   gap: 10px;
 }
 
+.illustration-options {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 140px;
+  gap: 10px;
+  align-items: end;
+  margin-bottom: 12px;
+}
+
+.toggle-field {
+  min-height: 43px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: #fff;
+  padding: 10px 11px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--ink);
+  font-size: 13px;
+}
+
+.toggle-field input {
+  width: auto;
+}
+
+.compact-field {
+  margin-bottom: 0;
+}
+
 .reference-block {
   margin-top: 8px;
   border: 1px solid var(--border);
@@ -529,6 +558,10 @@ input:focus {
   }
 
   .reference-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .illustration-options {
     grid-template-columns: 1fr;
   }
 

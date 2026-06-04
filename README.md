@@ -64,6 +64,14 @@ VISION_API_KEY=你的-qwen-vl-api-key
 VISION_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
 VISION_MODEL=qwen3-vl-flash
 
+# 文生图模型 — IllustrationAgent 生成可插入海报的插图资产
+# 不填则自动跳过，不影响原海报生成流程
+IMAGE_API_KEY=你的-image-api-key
+IMAGE_BASE_URL=https://api.openai.com/v1
+IMAGE_MODEL=gpt-image-1
+IMAGE_SIZE=1024x1024
+IMAGE_TIMEOUT_SECONDS=120
+
 # VLM 深度推理（看图→思考→评价）
 VISION_ENABLE_THINKING=true
 VISION_THINKING_BUDGET=8192
@@ -119,7 +127,9 @@ python -m http.server 5500
   "height": 1152,
   "max_iterations": 3,
   "min_iterations": 1,
-  "target_score": 85
+  "target_score": 85,
+  "enable_generated_illustrations": true,
+  "max_generated_illustrations": 3
 }
 ```
 
@@ -131,6 +141,8 @@ python -m http.server 5500
 | `max_iterations` | 3      | 最大迭代次数 (1–5)                                  |
 | `min_iterations` | 0      | 最少 VLM 评审次数，0=达标即停，1=至少一轮反馈后再停 |
 | `target_score`   | 85     | 目标评分，VLM 达到此分且 min_iterations 满足时停止  |
+| `enable_generated_illustrations` | true | 是否允许自动生成插图资产 |
+| `max_generated_illustrations` | 3 | 最多生成插图数量 (0–5) |
 
 ### 响应体
 
@@ -142,6 +154,7 @@ python -m http.server 5500
   "html_url": "/assets/a4779c96_0.html",
   "score": 85,
   "layout_html": "<!DOCTYPE html>...",
+  "generated_illustrations": [],
   "content_plan": { ... },
   "style": { ... },
   "critiques": [ { "score": 72, "vision_description": "...", "suggestions": [...] } ],

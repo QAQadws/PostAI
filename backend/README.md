@@ -96,6 +96,21 @@ VISION_MODEL=gpt-4.1-mini
 If the vision model is unavailable, the backend falls back to the heuristic
 critic and records the fallback in `warnings`.
 
+Generated illustrations are configured separately. When these values are blank,
+the new IllustrationAgent is skipped and the original poster generation flow
+continues:
+
+```text
+IMAGE_API_KEY=your-image-api-key
+IMAGE_BASE_URL=https://api.openai.com/v1
+IMAGE_MODEL=gpt-image-1
+IMAGE_SIZE=1024x1024
+IMAGE_TIMEOUT_SECONDS=120
+```
+
+Requests can disable this per job with `enable_generated_illustrations=false`,
+or cap cost with `max_generated_illustrations` from `0` to `5`.
+
 ## Linux Notes
 
 The renderer searches common Windows, Linux, and macOS font paths. For better

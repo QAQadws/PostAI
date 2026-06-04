@@ -1,12 +1,10 @@
-from pathlib import Path
-
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from app.api.middleware import RequestLoggingMiddleware
 from app.api.routes_generate import router as generate_router
-from app.core.config import get_settings
+from app.core.config import get_settings, resolve_asset_dir
 from app.core.logging import setup_logging
 
 
@@ -29,7 +27,7 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
 
-    asset_dir = Path(settings.asset_dir)
+    asset_dir = resolve_asset_dir(settings.asset_dir)
     asset_dir.mkdir(parents=True, exist_ok=True)
     app.mount(settings.asset_url_path, StaticFiles(directory=str(asset_dir)), name="assets")
     app.include_router(generate_router, prefix="/api/v1")

@@ -6,6 +6,7 @@ from dotenv import load_dotenv
 
 
 BACKEND_ROOT = Path(__file__).resolve().parents[2]
+PROJECT_ROOT = BACKEND_ROOT.parent
 
 
 def load_environment(dotenv_path: str | Path | None = None, *, override: bool = False) -> None:
@@ -47,6 +48,11 @@ class Settings:
     vision_model: str = "mock-vision"
     vision_enable_thinking: bool = True
     vision_thinking_budget: int = 8192
+    image_api_key: str | None = None
+    image_base_url: str | None = None
+    image_model: str = "mock-image"
+    image_size: str = "1024x1024"
+    image_timeout_seconds: float = 120
     log_level: str = "INFO"
     log_file: str = ""
 
@@ -70,6 +76,19 @@ def get_settings() -> Settings:
         vision_model=os.getenv("VISION_MODEL", "mock-vision"),
         vision_enable_thinking=_env_bool("VISION_ENABLE_THINKING", True),
         vision_thinking_budget=int(os.getenv("VISION_THINKING_BUDGET", "8192")),
+        image_api_key=os.getenv("IMAGE_API_KEY"),
+        image_base_url=os.getenv("IMAGE_BASE_URL"),
+        image_model=os.getenv("IMAGE_MODEL", "mock-image"),
+        image_size=os.getenv("IMAGE_SIZE", "1024x1024"),
+        image_timeout_seconds=float(os.getenv("IMAGE_TIMEOUT_SECONDS", "120")),
         log_level=os.getenv("LOG_LEVEL", "INFO"),
         log_file=os.getenv("LOG_FILE", "logs/postai.log"),
     )
+
+
+def resolve_asset_dir(asset_dir: str | Path | None = None) -> Path:
+    """Resolve the configured asset directory independent of process cwd."""
+    raw_path = Path(asset_dir if asset_dir is not None else get_settings().asset_dir)
+    if raw_path.is_absolute():
+        return raw_path
+    return PROJECT_ROOT / raw_path

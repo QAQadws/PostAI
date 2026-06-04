@@ -44,9 +44,26 @@ class RenderResult(BaseModel):
     )
 
 
+class GeneratedIllustration(BaseModel):
+    id: str = Field(min_length=1, max_length=120)
+    source_visual_subject_id: str | None = Field(default=None, max_length=120)
+    description: str = Field(min_length=1, max_length=1200)
+    prompt: str = Field(min_length=1, max_length=3000)
+    negative_prompt: str = Field(default="", max_length=1200)
+    url: str | None = Field(default=None, max_length=2048)
+    width: int | None = Field(default=None, ge=1, le=4096)
+    height: int | None = Field(default=None, ge=1, le=4096)
+    mime_type: Literal["image/png", "image/jpeg", "image/webp"] = "image/png"
+    placement_hint: str = Field(default="", max_length=800)
+    usage_guidance: str = Field(default="", max_length=800)
+    status: Literal["generated", "failed", "skipped"] = "generated"
+    error: str | None = Field(default=None, max_length=1000)
+
+
 class GraphStage(str, Enum):
     init = "init"
     content = "content"
+    illustration = "illustration"
     style = "style"
     layout = "layout"
     render = "render"
@@ -88,6 +105,12 @@ class GraphState(BaseModel):
         default_factory=list,
         description="Optional user-provided reference images with descriptions",
     )
+    enable_generated_illustrations: bool = True
+    max_generated_illustrations: int = Field(default=3, ge=0, le=5)
+    generated_illustrations: list[GeneratedIllustration] = Field(
+        default_factory=list,
+        description="AI-generated illustration assets available to layout planning",
+    )
     feedback_history: list[CritiqueResult] = Field(default_factory=list)
     vision_reasoning: str = Field(
         default="",
@@ -95,4 +118,3 @@ class GraphState(BaseModel):
     )
     warnings: list[str] = Field(default_factory=list)
     error: str | None = None
-

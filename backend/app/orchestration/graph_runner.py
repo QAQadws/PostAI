@@ -10,6 +10,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 
 from app.agents.content_extractor import ContentExtractor
+from app.agents.illustration_agent import IllustrationAgent
 from app.agents.layout_planner import SpatialLayoutPlanner
 from app.agents.style_director import StyleDirector
 from app.agents.vlm_critic import HeuristicVLMCritic
@@ -34,6 +35,7 @@ class GraphRunner:
         self,
         content_extractor: ContentExtractor | None = None,
         style_director: StyleDirector | None = None,
+        illustration_agent: IllustrationAgent | None = None,
         layout_planner: SpatialLayoutPlanner | None = None,
         renderer=None,
         asset_store: AssetStore | None = None,
@@ -44,9 +46,10 @@ class GraphRunner:
         settings = get_settings()
         self.content_extractor = content_extractor or ContentExtractor()
         self.style_director = style_director or StyleDirector()
+        self.asset_store = asset_store or AssetStore(settings.asset_dir, settings.asset_url_path)
+        self.illustration_agent = illustration_agent or IllustrationAgent(asset_store=self.asset_store)
         self.layout_planner = layout_planner or SpatialLayoutPlanner()
         self.renderer = renderer or HTMLPainter()
-        self.asset_store = asset_store or AssetStore(settings.asset_dir, settings.asset_url_path)
         self.critic = critic or HeuristicVLMCritic()
 
     # ── streaming (SSE) ──
@@ -60,6 +63,19 @@ class GraphRunner:
             yield event("agent_start", {"job_id": state.job_id, "agent": "ContentExtractor", "message": "Parsing poster content"})
             state.content_plan = await retry_async(lambda: self.content_extractor.run(state), attempts=3)
             yield event("agent_complete", {"job_id": state.job_id, "agent": "ContentExtractor", "result": state.content_plan.model_dump(mode="json")})
+
+            # ── Illustrations ──
+            state.stage = GraphStage.illustration
+            yield event("agent_start", {"job_id": state.job_id, "agent": "IllustrationAgent", "message": "Planning and generating illustration assets"})
+            warning_start = len(state.warnings)
+            state.generated_illustrations = await retry_async(lambda: self.illustration_agent.run(state), attempts=2)
+            yield event("agent_complete", {
+                "job_id": state.job_id,
+                "agent": "IllustrationAgent",
+                "result": self._illustration_event_result(state),
+            })
+            for message in state.warnings[warning_start:]:
+                yield event("warning", {"job_id": state.job_id, "message": message})
 
             # ── Style ──
             state.stage = GraphStage.style
@@ -128,6 +144,17 @@ class GraphRunner:
                     yield event("agent_start", {"job_id": state.job_id, "agent": "ContentExtractor", "message": decision.reason})
                     state.content_plan = await retry_async(lambda: self.content_extractor.run(state), attempts=3)
                     yield event("agent_complete", {"job_id": state.job_id, "agent": "ContentExtractor", "result": state.content_plan.model_dump(mode="json")})
+                    state.stage = GraphStage.illustration
+                    yield event("agent_start", {"job_id": state.job_id, "agent": "IllustrationAgent", "message": "Refreshing illustration assets after content update"})
+                    warning_start = len(state.warnings)
+                    state.generated_illustrations = await retry_async(lambda: self.illustration_agent.run(state), attempts=2)
+                    yield event("agent_complete", {
+                        "job_id": state.job_id,
+                        "agent": "IllustrationAgent",
+                        "result": self._illustration_event_result(state),
+                    })
+                    for message in state.warnings[warning_start:]:
+                        yield event("warning", {"job_id": state.job_id, "message": message})
 
             # ── Finalise ──
             state.stage = GraphStage.final
@@ -171,6 +198,7 @@ class GraphRunner:
             poster_brief=state.poster_brief,
             art_direction=state.art_direction,
             style=state.style,
+            generated_illustrations=list(state.generated_illustrations),
             layout_tree=state.layout_tree,
             layout_html=state.layout_html,
             html_url=state.html_url,
@@ -186,3 +214,30 @@ class GraphRunner:
             "critiques": list(state.feedback_history),
             "score": latest.score if latest else response.score,
         })
+
+    def _illustration_event_result(self, state: GraphState) -> dict:
+        assets = []
+        for asset in state.generated_illustrations:
+            item = {
+                "id": asset.id,
+                "source_visual_subject_id": asset.source_visual_subject_id,
+                "status": asset.status,
+                "url": asset.url,
+                "description": self._clip(asset.description, 180),
+                "placement_hint": asset.placement_hint,
+            }
+            if asset.error:
+                item["error"] = self._clip(asset.error, 240)
+            assets.append(item)
+        return {
+            "count": len(state.generated_illustrations),
+            "generated_count": sum(1 for asset in state.generated_illustrations if asset.status == "generated"),
+            "failed_count": sum(1 for asset in state.generated_illustrations if asset.status == "failed"),
+            "generated_illustrations": assets,
+        }
+
+    @staticmethod
+    def _clip(value: str, limit: int) -> str:
+        if len(value) <= limit:
+            return value
+        return value[:limit] + "..."

@@ -21,6 +21,7 @@ async def test_generate_endpoint_returns_image():
     payload = response.json()
     assert payload["final_image"]
     assert payload["image_url"].startswith("/assets/")
+    assert "generated_illustrations" in payload
 
 
 async def test_generate_endpoint_accepts_reference_images():
@@ -48,6 +49,25 @@ async def test_generate_endpoint_accepts_reference_images():
     assert response.status_code == 200
     payload = response.json()
     assert payload["job_id"]
+
+
+async def test_generate_endpoint_accepts_generated_illustration_controls():
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post(
+            "/api/v1/generate",
+            json={
+                "prompt": "制作一张科技风 AI 会议海报",
+                "width": 512,
+                "height": 768,
+                "max_iterations": 1,
+                "enable_generated_illustrations": False,
+                "max_generated_illustrations": 0,
+            },
+        )
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["generated_illustrations"] == []
 
 
 async def test_generate_endpoint_rejects_invalid_reference_image_url():
@@ -98,6 +118,7 @@ async def test_generate_stream_endpoint_emits_sse():
     assert response.status_code == 200
     assert "text/event-stream" in response.headers["content-type"]
     assert "event: final_output" in response.text
+    assert "IllustrationAgent" in response.text
 
 
 async def test_generate_endpoint_returns_502_on_graph_error(monkeypatch):

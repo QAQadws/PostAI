@@ -19,7 +19,7 @@ from app.schemas.agents import (
     VisualSubject,
 )
 from app.schemas.layout import CanvasSpec, ElementType
-from app.schemas.state import GraphState, ReferenceImage
+from app.schemas.state import GeneratedIllustration, GraphState, ReferenceImage
 
 
 def _make_brief(headline: str = "发布会", subhead: str = "未来已来",
@@ -278,6 +278,24 @@ async def test_layout_planner_falls_back_when_llm_fails():
     assert state.warnings
 
 
+async def test_layout_planner_fallback_injects_available_asset():
+    llm = FakeLLMClient([LLMCallError("network down")])
+    state = _state_for_planner()
+    state.generated_illustrations = [
+        GeneratedIllustration(
+            id="main-visual",
+            source_visual_subject_id="main_visual",
+            description="robot key visual",
+            prompt="draw robot",
+            url="/assets/generated_illustrations/job_main-visual.png",
+            status="generated",
+        )
+    ]
+    result = await SpatialLayoutPlanner(llm_client=llm).run(state)
+    assert "/assets/generated_illustrations/job_main-visual.png" in result
+    assert "injected-asset-visual" in result
+
+
 async def test_layout_planner_raises_when_fallback_disabled():
     llm = FakeLLMClient([LLMCallError("network down")])
     planner = SpatialLayoutPlanner(llm_client=llm)
@@ -294,6 +312,67 @@ async def test_layout_planner_strips_markdown_fences():
     result = await SpatialLayoutPlanner(llm_client=llm).run(_state_for_planner())
     assert not result.startswith("```")
     assert "<!DOCTYPE html>" in result
+
+
+async def test_layout_planner_includes_generated_illustrations_in_prompt():
+    llm = FakeLLMClient([_SAMPLE_HTML])
+    state = _state_for_planner()
+    state.generated_illustrations = [
+        GeneratedIllustration(
+            id="main-visual",
+            source_visual_subject_id="main_visual",
+            description="robot key visual",
+            prompt="draw robot",
+            url="/assets/generated_illustrations/job_main-visual.png",
+            placement_hint="Use as key visual.",
+            usage_guidance="Crop intentionally.",
+            status="generated",
+        )
+    ]
+    await SpatialLayoutPlanner(llm_client=llm).run(state)
+    user_prompt = llm.captured_messages[0][1]["content"]
+    assert "AI-generated illustration assets" in user_prompt
+    assert "/assets/generated_illustrations/job_main-visual.png" in user_prompt
+    assert "prefer these over generic placeholders" in user_prompt
+    assert "must still use another provided real asset URL" in user_prompt
+    assert "REAL ASSET REQUIREMENT" in llm.captured_messages[0][0]["content"]
+
+
+def test_layout_planner_injects_missing_generated_asset():
+    planner = SpatialLayoutPlanner()
+    state = _state_for_planner()
+    state.generated_illustrations = [
+        GeneratedIllustration(
+            id="main-visual",
+            source_visual_subject_id="main_visual",
+            description="robot key visual",
+            prompt="draw robot",
+            url="/assets/generated_illustrations/job_main-visual.png",
+            placement_hint="Use as key visual.",
+            usage_guidance="Crop intentionally.",
+            status="generated",
+        )
+    ]
+    html = planner._ensure_visual_assets_are_used(_SAMPLE_HTML, state)
+    assert "/assets/generated_illustrations/job_main-visual.png" in html
+    assert 'id="generated-illustration-main-visual"' in html
+    assert 'class="injected-asset-visual"' in html
+    assert state.warnings
+
+
+def test_layout_planner_does_not_inject_when_asset_already_used():
+    planner = SpatialLayoutPlanner()
+    state = _state_for_planner()
+    state.reference_images = [
+        ReferenceImage(
+            url="https://example.test/reference.png",
+            description="reference visual",
+        )
+    ]
+    html = _SAMPLE_HTML.replace("</body>", '<img src="https://example.test/reference.png" /></body>')
+    result = planner._ensure_visual_assets_are_used(html, state)
+    assert result == html
+    assert state.warnings == []
 
 
 # ── Phase 3: HTML validation ──
